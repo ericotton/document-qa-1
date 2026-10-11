@@ -93,7 +93,7 @@ if st.button(
 
         # PDF・画像に対応するモデルで回答
         stream = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4.1",
             messages=[
                 {
                     "role": "system",
