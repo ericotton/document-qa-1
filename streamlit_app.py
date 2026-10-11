@@ -1,13 +1,57 @@
 import base64
 import hashlib
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 from openai import OpenAI
 
+
+# APIの出典情報を、クリックできるリンクに変換
+def format_answer(response):
+    paragraphs = []
+
+    for item in response.output:
+        if item.type != "message":
+            continue
+
+        for part in item.content:
+            if part.type == "refusal":
+                paragraphs.append(part.refusal)
+                continue
+
+            if part.type != "output_text":
+                continue
+
+            text = part.text
+            citations = [
+                annotation
+                for annotation in part.annotations
+                if annotation.type == "url_citation"
+            ]
+
+            # 後ろから置換し、文字位置がずれないようにする
+            for citation in sorted(
+                citations,
+                key=lambda annotation: annotation.start_index,
+                reverse=True,
+            ):
+                link = f" [出典](<{citation.url}>)"
+                text = (
+                    text[:citation.start_index]
+                    + link
+                    + text[citation.end_index:]
+                )
+
+            paragraphs.append(text)
+
+    return "\n\n".join(paragraphs)
+
+
 st.title("📄 文書・画像への質問")
 st.write(
-    "文書や画像をアップロードして質問できます。"
+    "文書や画像とWeb検索を使って質問に回答します。"
     "回答後も、これまでのやりとりを踏まえて続けて質問できます。"
 )
 
@@ -44,7 +88,7 @@ document_id = (
     else None
 )
 
-# ファイルを変更・削除したら、前の会話をリセット
+# ファイルを変更・削除したら会話をリセット
 if document_id != st.session_state.document_id:
     st.session_state.chat_history = []
     st.session_state.document_id = document_id
@@ -57,7 +101,7 @@ if uploaded_file.size > 20 * 1024 * 1024:
     st.error("20MB以下のファイルをアップロードしてください。")
     st.stop()
 
-# ファイルをAIに渡すための形式に変換
+# Responses API用の形式に変換
 extension = Path(uploaded_file.name).suffix.lower()
 
 try:
@@ -68,7 +112,7 @@ try:
             document = file_bytes.decode("cp932")
 
         document_content = {
-            "type": "text",
+            "type": "input_text",
             "text": f"以下は参照する文書の内容です。\n\n{document}",
         }
 
@@ -76,11 +120,9 @@ try:
         encoded = base64.b64encode(file_bytes).decode("ascii")
 
         document_content = {
-            "type": "file",
-            "file": {
-                "filename": uploaded_file.name,
-                "file_data": f"data:application/pdf;base64,{encoded}",
-            },
+            "type": "input_file",
+            "filename": uploaded_file.name,
+            "file_data": f"data:application/pdf;base64,{encoded}",
         }
 
     else:
@@ -94,28 +136,24 @@ try:
         encoded = base64.b64encode(file_bytes).decode("ascii")
 
         document_content = {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:{mime_type};base64,{encoded}",
-            },
+            "type": "input_image",
+            "image_url": f"data:{mime_type};base64,{encoded}",
         }
 
 except UnicodeDecodeError:
     st.error("文字コードを読み取れません。UTF-8で保存して再度お試しください。")
     st.stop()
 
-# 同じ資料で会話をやり直すボタン
 if st.button("会話をリセット"):
     st.session_state.chat_history = []
 
-# これまでの質問と回答を画面に表示
+# 過去の質問・回答を表示
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# 回答後も使える質問欄
 question = st.chat_input(
-    "資料について質問してください。回答への追加質問もできます。"
+    "資料について質問してください。最新情報の確認や追加質問もできます。"
 )
 
 if question and question.strip():
@@ -124,46 +162,80 @@ if question and question.strip():
     with st.chat_message("user"):
         st.markdown(question)
 
-    # 過去の会話と今回の質問をまとめる
     conversation = [
         *st.session_state.chat_history,
         {"role": "user", "content": question},
     ]
 
-    # 資料は最初の質問に添付し、各リクエストで１回だけ送る
-    first_question = conversation[0]["content"]
-
+    # 資料は各リクエストに１回だけ添付
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "あなたは文書・画像についての質問に答えるアシスタントです。"
-                "添付資料と、これまでの質問・回答を踏まえて日本語で回答してください。"
-                "「それ」「先ほどの回答」などは会話の文脈から解釈してください。"
-                "資料にない情報や読み取れない箇所は、推測せず明示してください。"
-            ),
-        },
         {
             "role": "user",
             "content": [
                 document_content,
-                {"type": "text", "text": first_question},
+                {
+                    "type": "input_text",
+                    "text": conversation[0]["content"],
+                },
             ],
         },
         *conversation[1:],
     ]
 
+    # 日本時間の現在日時を自動取得
+    now = datetime.now(ZoneInfo("Asia/Tokyo")).strftime(
+        "%Y年%m月%d日 %H:%M（日本時間）"
+    )
+
+    instructions = (
+        "あなたは文書・画像とWeb検索を使って質問に答えるアシスタントです。"
+        f"現在日時は{now}です。"
+        "添付資料とこれまでの会話を踏まえ、日本語で回答してください。"
+        "質問に関連する情報をWeb検索で確認してください。"
+        "最新情報を求められた場合は、現在日時までに公開された情報を調べ、"
+        "公開日と出来事の日付を確認してください。"
+        "できるだけ公式サイトなどの一次情報を優先してください。"
+        "添付資料の記載とWeb検索で得た情報を区別し、"
+        "相違があればその内容と時点を説明してください。"
+        "Web情報には出典を付けてください。"
+        "確認できない情報や資料の読み取れない箇所は推測せず明示してください。"
+        "検索していない情報を、検索で確認したと述べないでください。"
+        "「それ」「先ほどの回答」などは会話の文脈から解釈してください。"
+    )
+
     try:
         with st.chat_message("assistant"):
-            stream = client.chat.completions.create(
-                model="gpt-6.1-sol",
-                messages=messages,
-                stream=True,
-            )
+            with st.spinner("Web検索で情報を確認し、回答を作成しています…"):
+                response = client.responses.create(
+                    model="gpt-6.1-sol",
+                    instructions=instructions,
+                    input=messages,
+                    tools=[
+                        {
+                            "type": "web_search",
+                            "external_web_access": True,
+                        }
+                    ],
+                    # 質問ごとにWeb検索を実行
+                    tool_choice="required",
+                    store=False,
+                )
 
-            answer = st.write_stream(stream)
+                if response.status != "completed":
+                    raise RuntimeError(
+                        "回答が完了しませんでした。質問を短くして再度お試しください。"
+                    )
 
-        # 回答が完了したら、今回の質問と回答を履歴に保存
+                answer = format_answer(response)
+
+                if not answer.strip():
+                    raise RuntimeError(
+                        "回答を取得できませんでした。再度お試しください。"
+                    )
+
+            st.markdown(answer)
+
+        # 完了した質問・回答を保存
         st.session_state.chat_history.extend([
             {"role": "user", "content": question},
             {"role": "assistant", "content": answer},
