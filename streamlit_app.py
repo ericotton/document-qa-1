@@ -1,53 +1,118 @@
+import base64
+from pathlib import Path
+
 import streamlit as st
 from openai import OpenAI
 
-# Show title and description.
-st.title("📄 Document question answering")
-st.write(
-    "Upload a document below and ask a question about it – GPT will answer! "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
+st.title("📄 文書・画像への質問")
+st.write("文書や画像をアップロードして、その内容について質問できます。")
+
+openai_api_key = st.text_input("OpenAI API Key", type="password")
+
+if not openai_api_key:
+    st.info("OpenAI APIキーを入力してください。", icon="🗝️")
+    st.stop()
+
+client = OpenAI(api_key=openai_api_key)
+
+# アップロードできる種類を追加
+uploaded_file = st.file_uploader(
+    "ファイルをアップロード（TXT・MD・PDF・PNG・JPG・JPEG・WebP）",
+    type=["txt", "md", "pdf", "png", "jpg", "jpeg", "webp"],
+    help="このアプリでは、１ファイル20MBまでに制限しています。",
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+question = st.text_area(
+    "ファイルについて質問してください。",
+    placeholder="内容を日本語で要約してください。",
+    disabled=uploaded_file is None,
+)
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# ボタンを押したときだけ、AIへ送信
+if st.button(
+    "回答を生成",
+    disabled=uploaded_file is None or not question.strip(),
+):
+    if uploaded_file.size > 20 * 1024 * 1024:
+        st.error("20MB以下のファイルをアップロードしてください。")
+        st.stop()
 
-    # Let the user upload a file via `st.file_uploader`.
-    uploaded_file = st.file_uploader(
-        "Upload a document (.txt or .md)", type=("txt", "md")
-    )
+    file_bytes = uploaded_file.getvalue()
+    extension = Path(uploaded_file.name).suffix.lower()
 
-    # Ask the user for a question via `st.text_area`.
-    question = st.text_area(
-        "Now ask a question about the document!",
-        placeholder="Can you give me a short summary?",
-        disabled=not uploaded_file,
-    )
+    try:
+        content = []
 
-    if uploaded_file and question:
+        # TXT・MD：文字として読み込む
+        if extension in [".txt", ".md"]:
+            try:
+                document = file_bytes.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                document = file_bytes.decode("cp932")
 
-        # Process the uploaded file and question.
-        document = uploaded_file.read().decode()
-        messages = [
-            {
-                "role": "user",
-                "content": f"Here's a document: {document} \n\n---\n\n {question}",
+            content.append({
+                "type": "text",
+                "text": f"以下は文書の内容です。\n\n{document}",
+            })
+
+        # PDF：PDFとしてAIへ渡す
+        elif extension == ".pdf":
+            encoded = base64.b64encode(file_bytes).decode("ascii")
+
+            content.append({
+                "type": "file",
+                "file": {
+                    "filename": uploaded_file.name,
+                    "file_data": f"data:application/pdf;base64,{encoded}",
+                },
+            })
+
+        # 画像：画像としてAIへ渡す
+        else:
+            mime_types = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
             }
-        ]
+            mime_type = mime_types[extension]
+            encoded = base64.b64encode(file_bytes).decode("ascii")
 
-        # Generate an answer using the OpenAI API.
+            content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{encoded}",
+                },
+            })
+
+        # 質問を追加
+        content.append({
+            "type": "text",
+            "text": question.strip(),
+        })
+
+        # PDF・画像に対応するモデルで回答
         stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "添付された文書や画像に基づいて、日本語で回答してください。"
+                        "読み取れない箇所や資料にない情報は、推測せず明示してください。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": content,
+                },
+            ],
             stream=True,
         )
 
-        # Stream the response to the app using `st.write_stream`.
         st.write_stream(stream)
+
+    except UnicodeDecodeError:
+        st.error("文字コードを読み取れません。UTF-8で保存して再度お試しください。")
+    except Exception as e:
+        st.error(f"処理中にエラーが発生しました：{e}")
