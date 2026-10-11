@@ -55,13 +55,18 @@ st.write(
     "回答後も、これまでのやりとりを踏まえて続けて質問できます。"
 )
 
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-
-if not openai_api_key:
-    st.info("OpenAI APIキーを入力してください。", icon="🗝️")
+# Secretsに保存したAPIキーを自動で読み込む
+try:
+    openai_api_key = st.secrets["OPENAI_API_KEY"]
+except (KeyError, FileNotFoundError):
+    st.error("アプリ管理者がSecretsにOPENAI_API_KEYを設定してください。")
     st.stop()
 
-client = OpenAI(api_key=openai_api_key)
+if not isinstance(openai_api_key, str) or not openai_api_key.strip():
+    st.error("SecretsのOPENAI_API_KEYに有効なAPIキーを設定してください。")
+    st.stop()
+
+client = OpenAI(api_key=openai_api_key.strip())
 
 # 会話履歴を初期化
 if "chat_history" not in st.session_state:
@@ -144,6 +149,7 @@ except UnicodeDecodeError:
     st.error("文字コードを読み取れません。UTF-8で保存して再度お試しください。")
     st.stop()
 
+# 同じ資料で会話をやり直すボタン
 if st.button("会話をリセット"):
     st.session_state.chat_history = []
 
@@ -152,6 +158,7 @@ for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+# 回答後も使える質問欄
 question = st.chat_input(
     "資料について質問してください。最新情報の確認や追加質問もできます。"
 )
@@ -162,6 +169,7 @@ if question and question.strip():
     with st.chat_message("user"):
         st.markdown(question)
 
+    # 過去の会話と今回の質問をまとめる
     conversation = [
         *st.session_state.chat_history,
         {"role": "user", "content": question},
