@@ -156,7 +156,7 @@ if question and question.strip():
     try:
         with st.chat_message("assistant"):
             stream = client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-6.1-sol",
                 messages=messages,
                 stream=True,
             )
